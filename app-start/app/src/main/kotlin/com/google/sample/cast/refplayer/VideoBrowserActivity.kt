@@ -23,15 +23,22 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import androidx.appcompat.widget.Toolbar
+import com.google.android.gms.cast.framework.CastButtonFactory
+import com.google.android.gms.cast.framework.CastContext
 import com.google.sample.cast.refplayer.settings.CastPreference
 
 class VideoBrowserActivity : AppCompatActivity() {
     private var mToolbar: Toolbar? = null
 
+    private var mCastContext: CastContext? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.video_browser)
         setupActionBar()
+
+        //Cat context 를 초기화 한다.
+        mCastContext = CastContext.getSharedInstance(this)
     }
 
     private fun setupActionBar() {
@@ -40,9 +47,13 @@ class VideoBrowserActivity : AppCompatActivity() {
         setSupportActionBar(mToolbar)
     }
 
+    private var mediaRouteMenuItem: MenuItem? = null
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         super.onCreateOptionsMenu(menu)
         menuInflater.inflate(R.menu.browse, menu)
+
+        //해당 하는 resouce 를 메뉴에 추가한다.
+        mediaRouteMenuItem = CastButtonFactory.setUpMediaRouteButton(applicationContext, menu, R.id.media_route_menu_item)
         return true
     }
 

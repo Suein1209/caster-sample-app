@@ -31,6 +31,7 @@ import android.os.Build
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Point
+import android.media.MediaMetadata
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Looper
@@ -43,6 +44,12 @@ import android.widget.*
 import androidx.appcompat.widget.Toolbar
 import androidx.core.view.ViewCompat
 import com.android.volley.toolbox.ImageLoader
+import com.google.android.gms.cast.MediaInfo
+import com.google.android.gms.cast.MediaLoadRequestData
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManagerListener
+import com.google.android.gms.common.images.WebImage
 import com.google.sample.cast.refplayer.utils.MediaItem
 import java.util.*
 
@@ -87,12 +94,22 @@ class LocalPlayerActivity : AppCompatActivity() {
         PLAYING, PAUSED, BUFFERING, IDLE
     }
 
+    private var mCastContext: CastContext? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.player_activity)
+
+        mCastContext = CastContext.getSharedInstance(this)
+        mCastSession = mCastContext!!.sessionManager.currentCastSession
+
         loadViews()
         setupControlsCallbacks()
         // see what we need to play and where
+
+        //세션 관리
+        setupCastListener()
+
         val bundle = intent.extras
         if (bundle != null) {
             mSelectedMedia = fromBundle(intent.getBundleExtra("media"))
@@ -113,9 +130,16 @@ class LocalPlayerActivity : AppCompatActivity() {
                 mVideoView!!.start()
                 startControllersTimer()
             } else {
-                // we should load the video but pause it
-                // and show the album art.
-                updatePlaybackLocation(PlaybackLocation.LOCAL)
+                /**
+                 * 사용자의 휴대기기에서 실행 중인 애플리케이션의 인스턴스뿐만 아니라 다른 휴대기기에서 실행 중인 사용자 또는 다른 사람의 애플리케이션 인스턴스로부터 연결이 방해를 받을 수 있습니다.
+                 * 세션 리스너를 등록하고 활동에서 사용할 일부 변수를 초기화해야 합니다.
+                 */
+                if (mCastSession != null && mCastSession!!.isConnected) {
+                    updatePlaybackLocation(PlaybackLocation.REMOTE)
+                } else {
+                    updatePlaybackLocation(PlaybackLocation.LOCAL)
+                }
+
                 mPlaybackState = PlaybackState.IDLE
                 updatePlayButton(mPlaybackState)
             }
@@ -125,11 +149,100 @@ class LocalPlayerActivity : AppCompatActivity() {
         }
     }
 
+    private var mSessionManagerListener: SessionManagerListener<CastSession>? = null
+    private var mCastSession: CastSession? = null
+    private fun setupCastListener() {
+        mSessionManagerListener = object : SessionManagerListener<CastSession> {
+            override fun onSessionEnded(p0: CastSession, p1: Int) {
+                onApplicationDisconnected()
+            }
+
+            override fun onSessionResumed(session: CastSession, p1: Boolean) {
+                onApplicationConnected(session)
+            }
+
+            override fun onSessionResumeFailed(p0: CastSession, p1: Int) {
+                onApplicationDisconnected()
+            }
+
+            override fun onSessionStarted(session: CastSession, p1: String) {
+                onApplicationConnected(session)
+            }
+
+            override fun onSessionStartFailed(p0: CastSession, p1: Int) {
+                onApplicationDisconnected()
+            }
+
+            override fun onSessionStarting(p0: CastSession) {}
+            override fun onSessionEnding(p0: CastSession) {}
+            override fun onSessionResuming(p0: CastSession, p1: String) {}
+            override fun onSessionSuspended(p0: CastSession, p1: Int) {}
+
+            private fun onApplicationConnected(castSession: CastSession) {
+                mCastSession = castSession
+                if (null != mSelectedMedia) {
+                    if (mPlaybackState == PlaybackState.PLAYING) {
+                        mVideoView!!.pause()
+                        loadRemoteMedia(mSeekbar!!.progress, true)
+                    } else {
+                        mPlaybackState = PlaybackState.IDLE
+                        updatePlaybackLocation(PlaybackLocation.REMOTE)
+                    }
+                }
+
+                updatePlayButton(mPlaybackState)
+                invalidateOptionsMenu()
+            }
+
+            private fun onApplicationDisconnected() {
+                updatePlaybackLocation(PlaybackLocation.LOCAL)
+                mPlaybackState = PlaybackState.IDLE
+                mLocation = PlaybackLocation.LOCAL
+                updatePlayButton(mPlaybackState)
+            }
+        }
+    }
+
+    /**
+     * Cast SDK에서 RemoteMediaClient는 수신기에서 원격 미디어 재생을 편리하게 관리할 수 있는 API 모음을 제공합니다.
+     * 미디어 재생을 지원하는 CastSession의 경우 RemoteMediaClient 인스턴스가 SDK에 의해 자동으로 생성됩니다.
+     * 이 인스턴스에는 CastSession 인스턴스에서 getRemoteMediaClient() 메서드를 호출하여 액세스할 수 있습니다.
+     * 이제 Cast 세션 로직을 사용하도록 다양한 기존 메서드를 업데이트하여 원격 재생을 지원합니다.
+     */
+    private fun loadRemoteMedia(position: Int, autoPlay: Boolean) {
+        if (mCastSession == null) {
+            return
+        }
+
+        val remoteMediaClient = mCastSession!!.remoteMediaClient ?: return
+        remoteMediaClient.load(
+                MediaLoadRequestData.Builder()
+                        .setMediaInfo(buildMediaInfo())
+                        .setCurrentTime(position.toLong())
+                        .build()
+        )
+    }
+
+    private fun buildMediaInfo(): MediaInfo? {
+        val movieMetadata = com.google.android.gms.cast.MediaMetadata(com.google.android.gms.cast.MediaMetadata.MEDIA_TYPE_MOVIE)
+        mSelectedMedia?.studio?.let { movieMetadata.putString(com.google.android.gms.cast.MediaMetadata.KEY_SUBTITLE, it) }
+        mSelectedMedia?.title?.let { movieMetadata.putString(com.google.android.gms.cast.MediaMetadata.KEY_TITLE, it) }
+        movieMetadata.addImage(WebImage(Uri.parse(mSelectedMedia!!.getImage(0))))
+        movieMetadata.addImage(WebImage(Uri.parse(mSelectedMedia!!.getImage(1))))
+        return mSelectedMedia!!.url?.let {
+            MediaInfo.Builder(it)
+                    .setStreamType(MediaInfo.STREAM_TYPE_BUFFERED)
+                    .setContentType("videos/mp4")
+                    .setMetadata(movieMetadata)
+                    .setStreamDuration((mSelectedMedia!!.duration * 1000).toLong())
+                    .build()
+        }
+    }
+
     private fun updatePlaybackLocation(location: PlaybackLocation) {
         mLocation = location
         if (location == PlaybackLocation.LOCAL) {
-            if (mPlaybackState == PlaybackState.PLAYING
-                    || mPlaybackState == PlaybackState.BUFFERING) {
+            if (mPlaybackState == PlaybackState.PLAYING || mPlaybackState == PlaybackState.BUFFERING) {
                 setCoverArtStatus(null)
                 startControllersTimer()
             } else {
@@ -150,10 +263,17 @@ class LocalPlayerActivity : AppCompatActivity() {
                 mVideoView!!.seekTo(position)
                 mVideoView!!.start()
             }
+
             PlaybackLocation.REMOTE -> {
                 mPlaybackState = PlaybackState.BUFFERING
                 updatePlayButton(mPlaybackState)
-            }else -> {}
+
+                //seek to a new position within the current media item's new position
+                //which is in milliseconds from the beginning of the stream
+                mCastSession!!.remoteMediaClient?.seek(position.toLong())
+            }
+
+            else -> {}
         }
         restartTrickplayTimer()
     }
@@ -170,13 +290,16 @@ class LocalPlayerActivity : AppCompatActivity() {
                     restartTrickplayTimer()
                     updatePlaybackLocation(PlaybackLocation.LOCAL)
                 }
+
                 PlaybackLocation.REMOTE -> finish()
                 else -> {}
             }
+
             PlaybackState.PLAYING -> {
                 mPlaybackState = PlaybackState.PAUSED
                 mVideoView!!.pause()
             }
+
             PlaybackState.IDLE -> when (mLocation) {
                 PlaybackLocation.LOCAL -> {
                     mVideoView!!.setVideoURI(Uri.parse(mSelectedMedia!!.url))
@@ -186,9 +309,16 @@ class LocalPlayerActivity : AppCompatActivity() {
                     restartTrickplayTimer()
                     updatePlaybackLocation(PlaybackLocation.LOCAL)
                 }
-                PlaybackLocation.REMOTE -> {}
+
+                PlaybackLocation.REMOTE -> {
+                    if (mCastSession != null && mCastSession!!.isConnected) {
+                        loadRemoteMedia(mSeekbar!!.progress, true)
+                    }
+                }
+
                 else -> {}
             }
+
             else -> {}
         }
         updatePlayButton(mPlaybackState)
@@ -196,8 +326,7 @@ class LocalPlayerActivity : AppCompatActivity() {
 
     private fun setCoverArtStatus(url: String?) {
         if (url != null) {
-            val mImageLoader = getInstance(this.applicationContext)
-                    ?.imageLoader
+            val mImageLoader = getInstance(this.applicationContext)?.imageLoader
             mImageLoader?.get(url, ImageLoader.getImageListener(mCoverArt, 0, 0))
             mCoverArt!!.setImageUrl(url, mImageLoader)
             mCoverArt!!.visibility = View.VISIBLE
@@ -255,6 +384,9 @@ class LocalPlayerActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         Log.d(TAG, "onPause() was called")
+
+        mCastContext!!.sessionManager.removeSessionManagerListener(mSessionManagerListener!!, CastSession::class.java)
+
         if (mLocation == PlaybackLocation.LOCAL) {
             if (mSeekbarTimer != null) {
                 mSeekbarTimer!!.cancel()
@@ -291,12 +423,20 @@ class LocalPlayerActivity : AppCompatActivity() {
     override fun onResume() {
         Log.d(TAG, "onResume() was called")
         updatePlaybackLocation(PlaybackLocation.LOCAL)
+
+        mCastContext!!.sessionManager.addSessionManagerListener(mSessionManagerListener!!, CastSession::class.java)
+        if (mCastSession != null && mCastSession!!.isConnected) {
+            updatePlaybackLocation(PlaybackLocation.REMOTE)
+        } else {
+            updatePlaybackLocation(PlaybackLocation.LOCAL)
+        }
+
         super.onResume()
     }
 
     private inner class HideControllersTask : TimerTask() {
         override fun run() {
-            looper.thread.join().apply{
+            looper.thread.join().apply {
                 updateControllersVisibility(false)
                 mControllersVisible = false
             }
@@ -305,7 +445,7 @@ class LocalPlayerActivity : AppCompatActivity() {
 
     private inner class UpdateSeekbarTask : TimerTask() {
         override fun run() {
-            looper.thread.join().apply{
+            looper.thread.join().apply {
                 if (mLocation == PlaybackLocation.LOCAL) {
                     val currentPos = mVideoView!!.currentPosition
                     updateSeekbar(currentPos, mDuration)
@@ -389,34 +529,36 @@ class LocalPlayerActivity : AppCompatActivity() {
 
     private fun updatePlayButton(state: PlaybackState?) {
         Log.d(TAG, "Controls: PlayBackState: $state")
-        val isConnected = false
+        val isConnected = (mCastSession != null && (mCastSession!!.isConnected || mCastSession!!.isConnecting))
         mControllers!!.visibility = if (isConnected) View.GONE else View.VISIBLE
         mPlayCircle!!.visibility = if (isConnected) View.GONE else View.VISIBLE
         when (state) {
             PlaybackState.PLAYING -> {
                 mLoading!!.visibility = View.INVISIBLE
                 mPlayPause!!.visibility = View.VISIBLE
-                mPlayPause!!.setImageDrawable(
-                        resources.getDrawable(R.drawable.ic_av_pause_dark))
+                mPlayPause!!.setImageDrawable(resources.getDrawable(R.drawable.ic_av_pause_dark))
                 mPlayCircle!!.visibility = if (isConnected) View.VISIBLE else View.GONE
             }
+
             PlaybackState.IDLE -> {
                 mPlayCircle!!.visibility = View.VISIBLE
                 mControllers!!.visibility = View.GONE
                 mCoverArt!!.visibility = View.VISIBLE
                 mVideoView!!.visibility = View.INVISIBLE
             }
+
             PlaybackState.PAUSED -> {
                 mLoading!!.visibility = View.INVISIBLE
                 mPlayPause!!.visibility = View.VISIBLE
-                mPlayPause!!.setImageDrawable(
-                        resources.getDrawable(R.drawable.ic_av_play_dark))
+                mPlayPause!!.setImageDrawable(resources.getDrawable(R.drawable.ic_av_play_dark))
                 mPlayCircle!!.visibility = if (isConnected) View.VISIBLE else View.GONE
             }
+
             PlaybackState.BUFFERING -> {
                 mPlayPause!!.visibility = View.INVISIBLE
                 mLoading!!.visibility = View.VISIBLE
             }
+
             else -> {}
         }
     }
